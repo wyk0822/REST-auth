@@ -5,6 +5,7 @@ from flask import Flask, abort, request, jsonify, g, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_httpauth import HTTPBasicAuth, HTTPTokenAuth
 import jwt
+from itsdangerous import Serializer
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # initialization
@@ -19,30 +20,44 @@ auth = HTTPBasicAuth()
 
 
 class User(db.Model):
-    __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(32), index=True)
-    password_hash = db.Column(db.String(64))
+    """用户"""
 
-    def hash_password(self, password):
-        self.password_hash = generate_password_hash(password)
+    __tablename__ = 'user'
 
-    def verify_password(self, password):
-        return check_password_hash(self.password_hash, password)
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)  # 用户名
+    hash_password = db.Column(db.String(120), nullable=False)  # 密码
+    phone = db.Column(db.String(20), nullable=False)  # 手机号
 
-    def generate_auth_token(self, expires_in=600):
-        return jwt.encode(
-            {'id': self.id, 'exp': time.time() + expires_in},
-            app.config['SECRET_KEY'], algorithm='HS256')
+    # 明文密码（只读）
+    @property
+    def password(self):
+        raise AttributeError('不可读')
 
+    # 写入密码，同时计算hash值，保存到模型中
+    @password.setter
+    def password(self, value):
+        self.hash_password = generate_password_hash(value)
+
+    # 检查密码是否正确
+    def check_password(self, password):
+        return check_password_hash(self.hash_password, password)
+
+    # 生成token
     @staticmethod
-    def verify_auth_token(token):
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'],
-                              algorithms=['HS256'])
-        except:
-            return
-        return User.query.get(data['id'])
+    def create_token(user_id):
+        """
+        生成token
+        :param user_id: 用户id
+        :return:
+        """
+
+        # 第一个参数是内部的私钥，这里写在配置信息里，如果只是测试可以写死
+        # 第二个参数是有效期（秒）
+        s = Serializer({"test":"ytautuy"}, expires_in=600)
+        # 接收用户id转换与编码
+        token = s.dumps({"id": user_id}).decode('ascii')
+        return token
 
 
 @auth.verify_password
