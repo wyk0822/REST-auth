@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import os
-import time
-from flask import Flask, abort, request, jsonify, g, url_for
+from time import time
+from flask import Flask, abort, request, jsonify, g, url_for, make_response, session, current_app
 from flask_sqlalchemy import SQLAlchemy
 from flask_httpauth import HTTPBasicAuth, HTTPTokenAuth
 import jwt
@@ -16,61 +16,69 @@ app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
 
 # extensions
 db = SQLAlchemy(app)
-auth = HTTPBasicAuth()
+auth = HTTPTokenAuth("JWT")
 
 
 class User(db.Model):
-    """用户"""
-
-    __tablename__ = 'user'
-
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)  # 用户名
-    hash_password = db.Column(db.String(120), nullable=False)  # 密码
-    phone = db.Column(db.String(20), nullable=False)  # 手机号
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(32), index=True)
+    password_hash = db.Column(db.String(64))
 
     # 明文密码（只读）
     @property
-    def password(self):
+    def hash_password(self):
         raise AttributeError('不可读')
 
     # 写入密码，同时计算hash值，保存到模型中
-    @password.setter
-    def password(self, value):
-        self.hash_password = generate_password_hash(value)
+    @hash_password.setter
+    def hash_password(self, password):
+        self.password_hash = generate_password_hash(password)
 
     # 检查密码是否正确
-    def check_password(self, password):
-        return check_password_hash(self.hash_password, password)
+    def verify_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
-    # 生成token
-    @staticmethod
-    def create_token(user_id):
-        """
-        生成token
-        :param user_id: 用户id
-        :return:
-        """
+    def generate_auth_token(self, expires_in=600):
+        return jwt.encode(
+            {'id': self.id, 'exp': time() + expires_in},
+            app.config['SECRET_KEY'], algorithm='HS256')
 
-        # 第一个参数是内部的私钥，这里写在配置信息里，如果只是测试可以写死
-        # 第二个参数是有效期（秒）
-        s = Serializer({"test":"ytautuy"}, expires_in=600)
-        # 接收用户id转换与编码
-        token = s.dumps({"id": user_id}).decode('ascii')
-        return token
+@auth.verify_token
+def verify_auth_token(token):
+    try:
+        data = jwt.decode(token, app.config['SECRET_KEY'],
+                          algorithms=['HS256'])
+    except:
+        return
+    return User.query.get(data['id'])
 
 
-@auth.verify_password
-def verify_password(username_or_token, password):
-    # first try to authenticate by token
-    user = User.verify_auth_token(username_or_token)
-    if not user:
-        # try to authenticate with username/password
-        user = User.query.filter_by(username=username_or_token).first()
-        if not user or not user.verify_password(password):
-            return False
-    g.user = user
-    return True
+
+@app.route('/api/login',methods=['POST'])
+def login():
+    username = request.json.get('username')
+    password = request.json.get('password')
+    if username is None or password is None:
+        abort(400)    # missing arguments
+    user:User = User.query.filter_by(username=username).first()
+    if user is None:
+        return make_response(jsonify({'error': 'unauthorized', 'message': '用户名不存在'}), 403)
+    if user.verify_password(password):
+        g.current_user = user
+        token = user.generate_auth_token(15 * 60)
+        # session.permanent = True
+        session['username'] = user.username
+        session['JWT_token'] = token
+        session['JWT_token_expiry'] = int(time()) + 15 * 60
+        return make_response(jsonify({
+            'username': user.username,
+            'token': token,
+            'expiration': 15 * 60,
+            # 'wizard': wizard()
+        }))
+    else:
+        return make_response(jsonify({'error': 'unauthorized', 'message': '密码错误'}), 403)
 
 
 @app.route('/api/users', methods=['POST'])
@@ -81,8 +89,8 @@ def new_user():
         abort(400)    # missing arguments
     if User.query.filter_by(username=username).first() is not None:
         abort(400)    # existing user
-    user = User(username=username)
-    user.hash_password(password)
+    user:User = User(username=username)
+    user.hash_password(password.encode())
     db.session.add(user)
     db.session.commit()
     return (jsonify({'username': user.username}), 201,
@@ -90,11 +98,12 @@ def new_user():
 
 
 @app.route('/api/users/<int:id>')
+@auth.login_required
 def get_user(id):
     user = User.query.get(id)
     if not user:
         abort(400)
-    return jsonify({'username': user.username})
+    return jsonify({'username': user.username,"pwd":user.password_hash})
 
 
 @app.route('/api/token')
